@@ -1,0 +1,342 @@
+---
+title: "Fitness effects of warming in hydra"
+author: "Jacint Tokolyi"
+date: "4/14/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Data preparation
+
+```{r message=FALSE, warning=FALSE}
+setwd("~/hidra/2022/TempWarming")
+
+#remotes::install_github("glmmTMB/glmmTMB/glmmTMB")
+library(readxl); library(ggplot2); library(glmmTMB); library(bbmle); library(cowplot); library(DHARMa); library(emmeans)
+twpre <- read_excel("TempWarming_full.xlsx",sheet=1)
+twpre$Group<-factor(twpre$Group, levels=c("CC","WC","CW","WW"))
+levels(twpre$Group)<-c("CS-CW","WS-CW","CS-WW","WS-WW")
+twpre$Sex<-ifelse(twpre$Strain%in%c("C2_7","M83_4","T3_2"),"Male","Female")
+twpre$Strain<-factor(twpre$Strain, levels=c("T3_1", "X11_14", "M26_9_10", "C2_7","M83_4","T3_2"))
+
+# Calculate pre-cooling size
+twpre$Size <- twpre$PolypAreaPixel / (twpre$StdmmPixel^2)
+
+gonads <- read_excel("TempWarming_full.xlsx",sheet=3) 
+gonads$Group<-factor(gonads$Group, levels=c("CC","WC","CW","WW"))
+levels(gonads$Group)<-c("CS-CW","WS-CW","CS-WW","WS-WW")
+twpre$Time2gonadogenesis<-as.numeric(as.Date(gonads$SexStartDate,format="%Y.%m.%d") - 
+  as.Date(gonads$StartDate,format="%Y.%m.%d") + 7)
+
+nc<-ncol(gonads)
+twpre$maxTestes[gonads$Strain%in%c("C2_7","M83_4","T3_2")]<-
+  apply(gonads[,7:nc][gonads$Strain%in%c("C2_7","M83_4","T3_2"),],1,max,na.rm=T)
+
+table(twpre$Comment[twpre$maxTestes== -Inf]) # list individuals with no gonad data
+# some of them might be individuals that survived to the end of the experiment
+# (Comment=="Regenerated" or "Necrotic") but did not produce any reproductive organs
+# We need to set gonad number to zero for these individuals
+twpre$maxTestes[which(twpre$maxTestes== -Inf & twpre$Comment%in%c("Regenerated","Necrotic"))] <- 0 
+# there was one fully asexual male in the experiment, maxTestes was set to 0.
+twpre$maxTestes[which(twpre$maxTestes== -Inf & twpre$Comment=="Dead")] <- NA
+# six males died without producing testes, we set their maxTestes to NA
+
+twpre$sumEggs[gonads$Strain%in%c("X11_14","M26_9_10","T3_1")]<-
+  apply(gonads[,7:nc][gonads$Strain%in%c("X11_14","M26_9_10","T3_1"),],1,max,na.rm=T)
+table(twpre$Comment[twpre$sumEggs== -Inf]) # list individuals with no gonad data
+twpre$sumEggs[which(twpre$sumEggs== -Inf & twpre$Comment%in%c("Regenerated","Necrotic"))] <- 0 
+# there were 12 animals that remained fully asexual throughout the experiment
+# and 5 animals that persisted throughout the experiment, but they produced no eggs. # Their sumEggs was set to 0
+twpre$sumEggs[which(twpre$sumEggs== -Inf & twpre$Comment%in%"Dead")] <- NA
+# 20 individuals died without producing eggs, we set their sumEggs to NA
+
+# Calculate number of buds produced during summer treatment
+twpre$Buds <- apply(twpre[c("Buds1","Buds2","Buds3","Buds4","Buds5")],
+                    1, sum, na.rm=T)
+
+buds <- read_excel("TempWarming_full.xlsx",sheet=2)
+twpre$totalBuds<-apply(buds[6:ncol(buds)],1,sum,na.rm=T)+twpre$Buds
+
+# Remove samples that are not good (accidentally lost/sex-changed, etc.):
+tw <- twpre[which(!twpre$Comment%in%c("Sex-changed","Hermaphrodite","Accidentally lost")),]
+tw$SummerTreat<-substring(tw$Group,1,2)
+tw$WinterTreat<-substring(tw$Group,4,5)
+
+table(tw$Comment)
+tw$Survival<-ifelse(tw$Comment=="Regenerated",1,0)
+
+m0m.full<-glmmTMB(Size~SummerTreat, data=tw[tw$Sex=="Male",], family="gaussian")
+m0m.red<-glmmTMB(Size~1, data=tw[tw$Sex=="Male",], family="gaussian")
+anova(m0m.full, m0m.red)
+
+m0f.full<-glmmTMB(Size~SummerTreat, data=tw[tw$Sex=="Female",], family="gaussian")
+m0f.red<-glmmTMB(Size~1, data=tw[tw$Sex=="Female",], family="gaussian")
+anova(m0f.full, m0f.red)
+
+ggplot(tw, aes(y=Size, x=SummerTreat, fill=Strain)) +
+  geom_boxplot(outlier.shape = NA) + 
+  facet_wrap(~Sex) + theme_bw() + geom_jitter(width=0.25,height=0.05,shape=21,fill="white",alpha=0.5)+
+  scale_fill_manual(values=list("T3_1"="#F48FB1","X11_14"="#F44336","M26_9_10"="#880E4F", "C2_7"="#00798c","M83_4"="#66a182","T3_2"="#2e4057"),
+                    labels=c("T3/1","X11/14","M26/9/10","C2/7","M83/4","T3/2"))
+
+tapply(tw$Size[tw$Sex=="Male"], tw$SummerTreat[tw$Sex=="Male"], mean, na.rm=T)
+1.42/1.88
+tapply(tw$Size[tw$Sex=="Female"], tw$SummerTreat[tw$Sex=="Female"], mean, na.rm=T)
+1.86/2.23
+```
+
+# Statistics
+
+##Sexual development time:
+
+```{r Time2gonadogenesis - males}
+# Males:
+m1m.full.gaussian<-glmmTMB(Time2gonadogenesis~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="gaussian")
+m1m.full.poisson<-glmmTMB(Time2gonadogenesis~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="poisson")
+m1m.full.nbinom1<-glmmTMB(Time2gonadogenesis~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="nbinom1")
+m1m.full.nbinom2<-glmmTMB(Time2gonadogenesis~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="nbinom2")
+
+AICctab(m1m.full.gaussian, m1m.full.poisson, m1m.full.nbinom1, m1m.full.nbinom2) # a Gaussian modell is preferred; the nbinom2 model didn't converge normally
+
+plot(simulateResiduals(m1m.full.gaussian))
+
+m1m.null<-glmmTMB(Time2gonadogenesis~1+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="gaussian")
+anova(m1m.full.gaussian, m1m.null) # Chisq=257.19, p<0.001
+m1m.pc<-emmeans(m1m.full.gaussian, specs=trt.vs.ctrl~Group)
+
+kruskal.test(tw$Time2gonadogenesis[tw$Sex=="Male"],tw$Group[tw$Sex=="Male"])
+pairwise.wilcox.test(tw$Time2gonadogenesis[tw$Sex=="Male"],tw$Group[tw$Sex=="Male"])
+```
+
+```{r Time2gonadogenesis - females}
+#Females
+m1f.full.gaussian<-glmmTMB(Time2gonadogenesis~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="gaussian")
+m1f.full.poisson<-glmmTMB(Time2gonadogenesis~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="poisson")
+m1f.full.nbinom1<-glmmTMB(Time2gonadogenesis~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="nbinom1")
+m1f.full.nbinom2<-glmmTMB(Time2gonadogenesis~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="nbinom2")
+
+AICctab(m1f.full.gaussian, m1f.full.poisson, m1f.full.nbinom1, m1f.full.nbinom2) # a  negative binomial model with quadratic parametrization is preferred
+
+plot(simulateResiduals(m1f.full.nbinom2))
+
+kruskal.test(tw$Time2gonadogenesis[tw$Sex=="Female"],tw$Group[tw$Sex=="Female"])
+pairwise.wilcox.test(tw$Time2gonadogenesis[tw$Sex=="Female"],tw$Group[tw$Sex=="Female"])
+
+m1f.null<-glmmTMB(Time2gonadogenesis~1+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="nbinom2")
+anova(m1f.full.nbinom2, m1f.null) # Chisq=133.34, p<0.001
+m1f.pc<-emmeans(m1f.full.nbinom2, specs=trt.vs.ctrl~Group)
+```
+
+##Male sexual fitness:
+
+```{r maxTestes}
+m2m.full.gaussian<-glmmTMB(maxTestes~Group+(1|Strain)+(1|StartDate), data=tw, family="gaussian")
+m2m.full.poisson<-glmmTMB(maxTestes~Group+(1|Strain)+(1|StartDate), data=tw, family="poisson")
+m2m.full.nbinom1<-glmmTMB(maxTestes~Group+(1|Strain)+(1|StartDate), data=tw, family="nbinom1")
+m2m.full.nbinom2<-glmmTMB(maxTestes~Group+(1|Strain)+(1|StartDate), data=tw, family="nbinom2")
+
+AICctab(m2m.full.gaussian, m2m.full.poisson, m2m.full.nbinom1, m2m.full.nbinom2) # gaussian model selected best, the nbinom1 didn't even converge
+plot(simulateResiduals(m2m.full.gaussian))
+
+m2m.null<-glmmTMB(maxTestes~1+(1|Strain)+(1|StartDate), data=tw, family="gaussian")
+anova(m2m.full.gaussian, m2m.null) # Chisq=56.428, p<0.001
+m2m.pc<-emmeans(m2m.full.gaussian, specs=trt.vs.ctrl~Group)
+```
+
+##Female sexual fitness:
+
+```{r sumEggs}
+m2f.full.gaussian<-glmmTMB(sumEggs~Group+(1|Strain)+(1|StartDate), data=tw, family="gaussian")
+m2f.full.poisson<-glmmTMB(sumEggs~Group+(1|Strain)+(1|StartDate), data=tw, family="poisson")
+m2f.full.nbinom1<-glmmTMB(sumEggs~Group+(1|Strain)+(1|StartDate), data=tw, family="nbinom1")
+m2f.full.nbinom2<-glmmTMB(sumEggs~Group+(1|Strain)+(1|StartDate), data=tw, family="nbinom2")
+
+AICctab(m2f.full.gaussian, m2f.full.poisson, m2f.full.nbinom1, m2f.full.nbinom2) # nbinom1 selected best
+plot(simulateResiduals(m2f.full.nbinom1))
+
+m2f.null<-glmmTMB(sumEggs~1+(1|Strain)+(1|StartDate), data=tw, family="nbinom1")
+anova(m2f.full.nbinom1, m2f.null) # Chisq=34.658, p<0.001
+m2f.pc<-emmeans(m2f.full.nbinom1, specs=trt.vs.ctrl~Group)
+```
+
+##Asexual fitness:
+
+```{r Male buds}
+m3m.full.gaussian<-glmmTMB(totalBuds~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="gaussian")
+m3m.full.poisson<-glmmTMB(totalBuds~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="poisson")
+m3m.full.nbinom1<-glmmTMB(totalBuds~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="nbinom1")
+m3m.full.nbinom2<-glmmTMB(totalBuds~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="nbinom2")
+
+AICctab(m3m.full.gaussian, m3m.full.poisson, m3m.full.nbinom1, m3m.full.nbinom2) # nbinom1 selected best
+plot(simulateResiduals(m3m.full.nbinom1))
+
+m3m.null<-glmmTMB(totalBuds~1+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="nbinom1")
+anova(m3m.full.nbinom1, m3m.null) # Chisq=26.956 p<0.001
+m3m.pc<-emmeans(m3m.full.nbinom1, specs=trt.vs.ctrl~Group)
+
+```
+
+```{r Female buds}
+m3f.full.gaussian<-glmmTMB(totalBuds~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="gaussian")
+m3f.full.poisson<-glmmTMB(totalBuds~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="poisson")
+m3f.full.nbinom1<-glmmTMB(totalBuds~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="nbinom1")
+m3f.full.nbinom2<-glmmTMB(totalBuds~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="nbinom2")
+
+AICctab(m3f.full.gaussian,m3f.full.poisson, m3f.full.nbinom1, m3f.full.nbinom2) # nbinom2 selected best
+plot(simulateResiduals(m3f.full.nbinom2))
+
+m3f.null<-glmmTMB(totalBuds~1+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="nbinom2")
+anova(m3f.full.nbinom2, m3f.null) # Chisq=6.1136 p=0.1062
+m3f.pc<-emmeans(m3f.full.nbinom2, specs=trt.vs.ctrl~Group)
+```
+
+```{r survival}
+m4m.full <- glmmTMB(Survival~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="binomial")
+m4m.null <- glmmTMB(Survival~1+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Male",], family="binomial")
+
+plot(simulateResiduals(m4m.full))
+anova(m4m.full, m4m.null) # Chisq=44.362 p<0.001
+m4m.pc<-emmeans(m4m.full, specs=trt.vs.ctrl~Group)
+
+m4f.full <- glmmTMB(Survival~Group+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="binomial")
+m4f.null <- glmmTMB(Survival~1+(1|Strain)+(1|StartDate), data=tw[tw$Sex=="Female",], family="binomial")
+
+plot(simulateResiduals(m4f.full))
+
+anova(m4f.full, m4f.null) # Chisq=7.3586 p=0.061
+m4f.pc<-emmeans(m4f.full, specs=trt.vs.ctrl~Group)
+```
+
+# Graphs
+
+```{r buds}
+plot_buds <- ggplot(tw, aes(y=totalBuds, x=Group))+
+  geom_boxplot(outlier.shape = NA)+
+#  geom_jitter(width=0.3,height=0.05,shape=21,fill="white",alpha=0.5)+
+  geom_point(position=position_jitterdodge(),alpha=0.5,aes(color=Strain))+
+  theme_bw()+ylab("Number of buds")+
+  facet_wrap(~Sex)+
+  scale_color_manual(values=list("T3_1"="#F48FB1","X11_14"="#F44336","M26_9_10"="#880E4F", "C2_7"="#00798c","M83_4"="#66a182","T3_2"="#2e4057"),
+                    labels=c("T3/1","X11/14","M26/9/10","C2/7","M83/4","T3/2"))
+
+```
+
+```{r survival plot}
+library(dplyr); library(ggpubr)
+
+surv <- tw %>% group_by(Sex,Strain,Group,Survival)%>% summarise(n=n()) %>% group_by(Sex, Group) %>% mutate(freq=n/sum(n))
+surv <- arrange(surv, Sex, Group, desc(Survival), desc(Strain)) %>% group_by(Sex,Group) %>%
+  mutate(lab_ypos = cumsum(freq) - 0.5*freq)
+
+plot_surv <- ggplot(surv[which(surv$Survival==1),],aes(fill=Strain, y=freq, x=Group))+geom_bar(stat="identity")+facet_wrap(~Sex)+
+      geom_text(aes(y=lab_ypos, group=Group,label=n))+
+    scale_fill_manual(values=list("T3_1"="#F48FB1","X11_14"="#F44336","M26_9_10"="#880E4F", "C2_7"="#00798c","M83_4"="#66a182","T3_2"="#2e4057"),labels=c("T3/1", "X11/14", "M26/9/10", "C2/7", "M83/4", "T3/2"))+
+  ylab("Prop. surviving")+theme_bw()
+
+plot_grid(plot_buds, NULL, plot_surv, NULL, legend="top",ncol=2, nrow=2, rel_widths=c(3,1),
+          labels=c("A","","B",""))
+```
+
+##Temporal patterns:
+
+```{r temporal patterns}
+temporal.status<-matrix(NA, ncol=21, nrow=nrow(gonads))
+row.names(temporal.status) <- paste(gonads$Strain, gonads$Group, gonads$Plate, gonads$ID, sep="-")
+
+gonads$StartDate<-as.Date(gonads$StartDate, format="%Y.%m.%d")
+dates<-as.Date(names(gonads)[7:ncol(gonads)], format="%m_%d")
+
+for(i in 1:nrow(gonads)){
+  for(j in 1:ncol(temporal.status)){
+    start.col<-gonads$StartDate[i]+7*(j-1)
+    end.col<-gonads$StartDate[i]+7*j
+    sel<-dates[dates>start.col & dates<end.col]
+    if(length(sel)>0){
+      week.df<-gonads[,(match(sel, dates)+6)]
+      temporal.status[,j][i]<-ifelse(all(is.na(week.df[i,])),0,1)
+    }
+  }
+}
+
+groups<-rep(unique(gsub("-[1-6]-[1-6]$","",row.names(temporal.status))),each=21)
+temporal.df<-data.frame(group=groups,week=1:21,prop.sexual=NA)
+
+for(i in 1:length(unique(groups))){
+  subset<-temporal.status[grep(unique(groups)[i], row.names(temporal.status)),]
+  temporal.df$prop.sexual[temporal.df$group==unique(groups)[i]] <- apply(subset,2,sum,na.rm=T) / apply(subset,2,length)
+}
+
+temporal.df$Strain<-sapply(strsplit(temporal.df$group,split="-"),"[",1)
+temporal.df$Trt<-sapply(lapply(strsplit(temporal.df$group, split="-"),"[",2:3),paste,collapse="-")
+```
+
+```{r male gametogenesis}
+plot_testes_proportion<-ggplot(temporal.df[temporal.df$Strain%in%c("C2_7","T3_2","M83_4"),],
+                               aes(y=prop.sexual,x=week,group=Strain,color=Strain)) + 
+  geom_point() + geom_line() + facet_wrap(~Trt)+
+  ylab("Proportion producing gonads")+
+  scale_color_manual(values=c("C2_7"="#00798c","M83_4"="#66a182","T3_2"="#2e4057"),
+                     labels=c("C2/7","M83/4","T3/2"))+theme_bw()
+
+plot_male_sexstart<-ggplot(tw[which(tw$Sex=="Male"),], aes(y=Time2gonadogenesis, x=Group))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position=position_jitterdodge(),alpha=0.5,aes(color=Strain))+
+  theme_bw()+ylab("Sexual development time")+
+  scale_color_manual(values=list("C2_7"="#00798c","M83_4"="#66a182","T3_2"="#2e4057"),
+                    labels=c("C2/7","M83/4","T3/2"))+
+  theme(legend.position = "none")
+ 
+plot_maxtestes<-ggplot(tw[tw$Sex=="Male",], aes(y=maxTestes, x=Group))+
+  geom_boxplot(outlier.shape = NA)+
+ theme_bw()+  geom_point(position=position_jitterdodge(),alpha=0.5,aes(color=Strain))+
+  scale_color_manual(values=list("C2_7"="#00798c","M83_4"="#66a182","T3_2"="#2e4057"),
+                    labels=c("C2/7","M83/4","T3/2"))+
+  theme(legend.position = "none")+ylab("Max no. testes")
+
+legend <- cowplot::get_legend(plot_testes_proportion)
+pg1 <- plot_grid(plot_male_sexstart, plot_maxtestes,nrow=1,labels="AUTO")
+bottom_row <- plot_grid(plot_testes_proportion+theme(legend.position="none"),legend, NULL, nrow=1,rel_widths=c(3.5,1,1))
+plot_grid(pg1, bottom_row,nrow=2,labels=c("","C"))
+```
+
+```{r female gametogenesis}
+plot_eggs_proportion<-ggplot(temporal.df[temporal.df$Strain%in%c("X11_14","T3_1","M26_9_10"),], 
+                             aes(y=prop.sexual,x=week,group=Strain,color=Strain)) + geom_point() +
+  geom_line()+facet_wrap(~Trt)+ylab("Proportion producing gonads")+
+  scale_color_manual(values=c("T3_1"="#F48FB1","X11_14"="#F44336","M26_9_10"="#880E4F"),
+                     labels=c("T3/1","X11/14","M26/9/10"))+theme_bw()
+
+plot_female_sexstart<-ggplot(tw[which(tw$Sex=="Female"),], aes(y=Time2gonadogenesis, x=Group))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position=position_jitterdodge(),alpha=0.5,aes(color=Strain))+
+  theme_bw()+
+  scale_color_manual(values=list("T3_1"="#F48FB1","X11_14"="#F44336","M26_9_10"="#880E4F"),
+                    labels=c("T3/1","X11/14","M26/9/10"))+
+    theme(legend.position = "none")
+
+plot_sumeggs<-ggplot(tw[tw$Sex=="Female",], aes(y=sumEggs, x=Group))+
+  geom_boxplot(outlier.shape = NA)+
+    scale_color_manual(values=list("T3_1"="#F48FB1","X11_14"="#F44336","M26_9_10"="#880E4F"),
+                    labels=c("T3/1","X11/14","M26/9/10"))+
+  theme_bw()+  geom_point(position=position_jitterdodge(),alpha=0.5,aes(color=Strain))+
+  theme(legend.position="none")
+
+legend <- cowplot::get_legend(plot_eggs_proportion)
+pg1 <- plot_grid(plot_female_sexstart, plot_sumeggs,nrow=1,labels="AUTO")
+bottom_row <- plot_grid(plot_eggs_proportion+theme(legend.position="none"),legend, NULL, nrow=1,rel_widths=c(3.5,1,1))
+plot_grid(pg1, bottom_row,nrow=2,labels=c("","C"))
+```
+
+# Export models
+
+```{r export models}
+model_outputs <-
+rbind(cbind(as.data.frame(m1m.pc$contrasts), as.data.frame(m1f.pc$contrasts)),
+      cbind(as.data.frame(m2m.pc$contrasts), as.data.frame(m2f.pc$contrasts)),
+      cbind(as.data.frame(m3m.pc$contrasts), as.data.frame(m3f.pc$contrasts)),
+      cbind(as.data.frame(m4m.pc$contrasts), as.data.frame(m4f.pc$contrasts)))
+write.table(model_outputs, file="~/hidra/2022/TempWarming/model_outputs.csv",
+            col.names=T, row.names=F, quote=F, sep="\t")
+
+```
